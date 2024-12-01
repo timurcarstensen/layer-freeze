@@ -18,7 +18,8 @@ classifiers = [
 dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
-    "optuna>=3.0.0",
+    "neural-pipeline-search@git+https://github.com/automl/neps.git",
+    "GitPython",
 ]
 
 [project.optional-dependencies]
