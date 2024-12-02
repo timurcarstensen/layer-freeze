@@ -1,5 +1,9 @@
+# slurm logs
+**/logs/
+
 # project
-data
+**/data
+**/output
 
 # macOS
 .DS_Store
