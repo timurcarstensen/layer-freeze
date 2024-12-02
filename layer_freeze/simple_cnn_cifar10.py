@@ -20,6 +20,12 @@ import torchvision.transforms as transforms  # noqa: E402
 from neps.plot.tensorboard_eval import tblogger  # noqa: E402
 
 
+def create_model(num_classes: int = 10) -> nn.Module:
+    model = torchvision.models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
+
+
 def freeze_layers(model: nn.Module, n_unfrozen_layers: int) -> None:
     """Freeze all layers except the last n_unfrozen_layers layers."""
     # Freeze all layers
@@ -31,61 +37,6 @@ def freeze_layers(model: nn.Module, n_unfrozen_layers: int) -> None:
     for layer in layers_to_unfreeze:
         for param in layer.parameters():
             param.requires_grad = True
-
-
-class Net(nn.Module):
-    def __init__(
-        self,
-        num_classes: int = 10,
-        conv_channels: int = 16,
-        fc_units: int = 120,
-        dropout_rate: float = 0.0,
-    ):
-        super().__init__()
-
-        # Fixed 3-layer CNN architecture
-        self.layer_1 = nn.Sequential(
-            nn.Conv2d(3, conv_channels, 3, padding=1),
-            nn.BatchNorm2d(conv_channels),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-            nn.Dropout(dropout_rate),
-        )
-
-        self.layer_2 = nn.Sequential(
-            nn.Conv2d(conv_channels, conv_channels * 2, 3, padding=1),
-            nn.BatchNorm2d(conv_channels * 2),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-            nn.Dropout(dropout_rate),
-        )
-
-        self.layer_3 = nn.Sequential(
-            nn.Conv2d(conv_channels * 2, conv_channels * 4, 3, padding=1),
-            nn.BatchNorm2d(conv_channels * 4),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-            nn.Dropout(dropout_rate),
-        )
-
-        # Calculate feature size (input is 32x32, after 3 max pools it's 4x4)
-        feature_size = (conv_channels * 4) * 4 * 4
-
-        # Fixed 2-layer classifier
-        self.classifier = nn.Sequential(
-            nn.Linear(feature_size, fc_units),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(fc_units, num_classes),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.layer_1(x)
-        x = self.layer_2(x)
-        x = self.layer_3(x)
-        x = torch.flatten(x, 1)
-        x = self.classifier(x)
-        return x
 
 
 def data_prep(batch_size: int, get_val_set: bool = True) -> tuple:
@@ -144,12 +95,7 @@ def training_pipeline(
     trainloader, validloader, testloader, num_classes = data_prep(batch_size=batch_size)
 
     # Define model with new parameters
-    model = Net(
-        num_classes=num_classes,
-        conv_channels=conv_channels,
-        fc_units=fc_units,
-        dropout_rate=dropout_rate,
-    )
+    model = create_model(num_classes=num_classes)
 
     # freeze layers
     freeze_layers(model=model, n_unfrozen_layers=n_unfrozen_layers)
