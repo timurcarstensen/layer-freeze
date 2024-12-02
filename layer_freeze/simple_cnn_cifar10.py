@@ -8,15 +8,19 @@ import warnings
 from functools import partial
 from pathlib import Path
 
+import pandas as pd
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import git  # noqa: E402
-import neps  # noqa: E402
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 import torch.optim as optim  # noqa: E402
 import torchvision  # noqa: E402
 import torchvision.transforms as transforms  # noqa: E402
+from tqdm import tqdm  # noqa: E402
+
+import neps  # noqa: E402
 from neps.plot.tensorboard_eval import tblogger  # noqa: E402
 
 
@@ -46,6 +50,10 @@ def data_prep(batch_size: int, get_val_set: bool = True) -> tuple:
         [
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(degrees=15),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+            transforms.RandomPerspective(distortion_scale=0.2, p=0.5),
         ]
     )
     dataset_class = torchvision.datasets.CIFAR10
@@ -58,17 +66,17 @@ def data_prep(batch_size: int, get_val_set: bool = True) -> tuple:
         train_size = len(trainset) - 10000  # Reserve 10k samples for validation
         train_set, val_set = torch.utils.data.random_split(trainset, [train_size, 10000])
         validloader = torch.utils.data.DataLoader(
-            val_set, batch_size=batch_size, shuffle=False, num_workers=1
+            val_set, batch_size=batch_size, shuffle=False, num_workers=4
         )
     else:
         train_set = trainset
         validloader = None
 
     trainloader = torch.utils.data.DataLoader(
-        train_set, batch_size=batch_size, shuffle=True, num_workers=1
+        train_set, batch_size=batch_size, shuffle=True, num_workers=4
     )
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch_size, shuffle=False, num_workers=1
+        testset, batch_size=batch_size, shuffle=False, num_workers=4
     )
 
     return trainloader, validloader, testloader, num_classes
@@ -79,8 +87,8 @@ def training_pipeline(
     previous_pipeline_directory: str | None,
     epochs: int = 10,
     n_unfrozen_layers: int = 1,
-    batch_size: int = 64,
-    learning_rate: float = 0.001,
+    batch_size: int = 1024,
+    learning_rate: float = 0.008,
     weight_decay: float = 0.01,
     beta1: float = 0.9,
     beta2: float = 0.999,
@@ -99,19 +107,24 @@ def training_pipeline(
 
     # freeze layers
     freeze_layers(model=model, n_unfrozen_layers=n_unfrozen_layers)
+    logging.info(f"Model total num parameters: {sum(p.numel() for p in model.parameters())}")
+    logging.info(
+        f"Model num parameters to train: "
+        f"{sum(p.numel() for p in filter(lambda p: p.requires_grad, model.parameters()))}"
+    )
 
     # Define loss function and optimizer
     criterion = nn.CrossEntropyLoss()
     if optimizer.lower() == "adam":
         optimizer = optim.Adam(
-            model.parameters(),
+            filter(lambda p: p.requires_grad, model.parameters()),
             lr=learning_rate,
             betas=[beta1, beta2],
             weight_decay=weight_decay,
         )
     elif optimizer.lower() == "sgd":
         optimizer = optim.SGD(
-            model.parameters(),
+            filter(lambda p: p.requires_grad, model.parameters()),
             lr=learning_rate,
             momentum=beta1,
             weight_decay=weight_decay,
@@ -135,9 +148,14 @@ def training_pipeline(
 
     # Training loop
     _start = time.time()
+    forward_times = []
+    backward_times = []
+    model.train()
     for epoch in range(start_epoch, epochs + 1):
         running_loss = 0.0
-        for batch_idx, (data, target) in enumerate(trainloader, 0):
+        for batch_idx, (data, target) in enumerate(
+            tqdm(trainloader, desc=f"Epoch {epoch}", leave=False, disable=True), 0
+        ):
             # zero the parameter gradients
             optimizer.zero_grad()
 
@@ -145,9 +163,19 @@ def training_pipeline(
             if torch.cuda.is_available():
                 data = data.cuda()
                 target = target.cuda()
+
+            forward_start = time.time()
             outputs = model(data)
+            forward_end = time.time()
+            forward_times.append(forward_end - forward_start)
+
             loss = criterion(outputs, target)
+
+            backward_start = time.time()
             loss.backward()
+            backward_end = time.time()
+            backward_times.append(backward_end - backward_start)
+
             optimizer.step()
 
             # print statistics
@@ -157,10 +185,14 @@ def training_pipeline(
         training_loss_for_epoch = running_loss / (batch_idx + 1)
     _end = time.time()
 
+    avg_forward_time = sum(forward_times) / len(forward_times)
+    avg_backward_time = sum(backward_times) / len(backward_times)
+
     # Validation loop
     correct = 0
     total = 0
     _val_start = time.time()
+    model.eval()
     # since we're not training, we don't need to calculate the gradients for our outputs
     with torch.no_grad():
         for data in validloader:
@@ -206,6 +238,28 @@ def training_pipeline(
             extra_data={
                 "train_loss": tblogger.scalar_logging(loss.item()),
                 "val_err": tblogger.scalar_logging(val_err),
+                "val_acc": tblogger.scalar_logging(val_accuracy),
+                "n_trainable_params": tblogger.scalar_logging(
+                    sum(p.numel() for p in filter(lambda p: p.requires_grad, model.parameters()))
+                ),
+                "n_total_params": tblogger.scalar_logging(
+                    sum(p.numel() for p in model.parameters())
+                ),
+                "n_unfrozen_layers": tblogger.scalar_logging(n_unfrozen_layers),
+                "perc_trainable_params": tblogger.scalar_logging(
+                    (
+                        sum(
+                            p.numel() for p in filter(lambda p: p.requires_grad, model.parameters())
+                        )
+                        / sum(p.numel() for p in model.parameters())
+                    )
+                    * 100
+                ),
+                "gpu_memory_used_mb": tblogger.scalar_logging(
+                    torch.cuda.max_memory_allocated() / (1024 * 1024)
+                ),
+                "avg_forward_time_ms": tblogger.scalar_logging(avg_forward_time * 1000),
+                "avg_backward_time_ms": tblogger.scalar_logging(avg_backward_time * 1000),
             },
         )
 
@@ -216,9 +270,35 @@ def training_pipeline(
             "train_loss": training_loss_for_epoch,
             "validation_time": _val_end - _val_start,
             "current_epoch": epochs,
+            "gpu_memory_used_mb": torch.cuda.max_memory_allocated()
+            / (1024 * 1024),  # Convert to MB
             "pid": os.getpid(),
+            "avg_forward_time_ms": avg_forward_time * 1000,
+            "avg_backward_time_ms": avg_backward_time * 1000,
         },
     }
+
+
+def get_best_config_id(run_status_path: str) -> int:
+    run_status_df = pd.read_csv(run_status_path)
+    best_config_id = run_status_df.loc[
+        run_status_df["description"] == "best_config_id", "value"
+    ].values[0]
+    return int(best_config_id)
+
+
+def get_best_config(config_data_path: str, best_config_id: int) -> pd.DataFrame:
+    config_data_df = pd.read_csv(config_data_path)
+    best_config_row = config_data_df[config_data_df["config_id"] == best_config_id]
+    best_config = {
+        "beta1": best_config_row["config.beta1"].values[0],
+        "beta2": best_config_row["config.beta2"].values[0],
+        "dropout_rate": best_config_row["config.dropout_rate"].values[0],
+        "learning_rate": best_config_row["config.learning_rate"].values[0],
+        "optimizer": best_config_row["config.optimizer"].values[0],
+        "weight_decay": best_config_row["config.weight_decay"].values[0],
+    }
+    return best_config
 
 
 if __name__ == "__main__":
@@ -235,7 +315,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Count number of layers in Net by checking children
-    model = Net()
+    model = create_model()
     num_layers = len(list(model.children()))
     if args.n_unfrozen_layers > num_layers:
         raise ValueError(
@@ -244,7 +324,7 @@ if __name__ == "__main__":
         )
 
     pipeline_space = {
-        "learning_rate": neps.Float(1e-5, 1e-1, log=True, default=0.001),
+        "learning_rate": neps.Float(1e-5, 1e-1, log=True, default=0.008),
         "beta1": neps.Float(0.9, 0.999, log=True, default=0.9),
         "beta2": neps.Float(0.9, 0.999, log=True, default=0.999),
         "weight_decay": neps.Float(1e-5, 0.1, log=True, default=0.01),
@@ -269,9 +349,25 @@ if __name__ == "__main__":
         run_pipeline=partial(
             training_pipeline,
             log_tensorboard=True,
+            n_unfrozen_layers=args.n_unfrozen_layers,
         ),
         searcher=algo,
-        max_evaluations_total=500,
+        max_evaluations_total=2,
         root_directory=(f"{root_directory}/" f"{args.group_name}/{algo}/{output_tree}/"),
         overwrite_working_directory=False,
     )
+
+    config_files_dir = root_directory / output_tree / "summary_csv"
+    best_config_id = get_best_config_id(config_files_dir / "run_status.csv")
+    best_config = get_best_config(config_files_dir / "config_data.csv", best_config_id)
+    print(best_config)
+
+    # Evaluate best config with all layers unfrozen
+    print("\nEvaluating best config with all layers unfrozen...")
+    best_config_dict = best_config.to_dict()
+    evaluation_result = training_pipeline(
+        log_tensorboard=True,
+        **best_config_dict,
+        n_unfrozen_layers=num_layers,  # Use all layers
+    )
+    print(f"\nFull model evaluation result: {evaluation_result}")
