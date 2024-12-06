@@ -13,15 +13,15 @@ import pandas as pd
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import git  # noqa: E402
+import neps  # noqa: E402
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 import torch.optim as optim  # noqa: E402
 import torchvision  # noqa: E402
 import torchvision.transforms as transforms  # noqa: E402
-from tqdm import tqdm  # noqa: E402
-
-import neps  # noqa: E402
+from neps.optimizers import GridSearch  # noqa: E402
 from neps.plot.tensorboard_eval import tblogger  # noqa: E402
+from tqdm import tqdm  # noqa: E402
 
 
 def create_model(num_classes: int = 10) -> nn.Module:
@@ -200,16 +200,13 @@ def training_pipeline(
     beta2: float = 0.999,
     optimizer_name: str = "adam",
     log_tensorboard: bool = True,
-    dropout_rate: float = 0.0,
-    conv_channels: int = 16,
-    fc_units: int = 128,
 ) -> dict:
     """Main training interface for HPO."""
     # reset memory stats
     torch.cuda.reset_peak_memory_stats()
 
     # Prepare data
-    trainloader, validloader, testloader, num_classes = data_prep(batch_size=batch_size)
+    trainloader, validloader, _, num_classes = data_prep(batch_size=batch_size)
 
     # Define model with new parameters
     model = create_model(num_classes=num_classes)
@@ -262,9 +259,7 @@ def training_pipeline(
     model.train()
     for epoch in range(start_epoch, epochs + 1):
         running_loss = 0.0
-        for batch_idx, (data, target) in enumerate(
-            tqdm(trainloader, desc=f"Epoch {epoch}", leave=False, disable=True), 0
-        ):
+        for i, (data, target) in enumerate(trainloader):  # noqa: B007
             # zero the parameter gradients
             optimizer.zero_grad()
 
@@ -288,9 +283,7 @@ def training_pipeline(
 
             # print statistics
             running_loss += loss.item()
-        # print(f'[epoch={epoch},batch={batch_idx+1:<5d}]\tloss: {running_loss / (batch_idx+1):.6f}')
-        print(f"epoch={epoch:<2d}\tloss: {running_loss / (batch_idx+1):.6f}")
-        training_loss_for_epoch = running_loss / (batch_idx + 1)
+        training_loss_for_epoch = running_loss / (i + 1)
     _end = time.time()
 
     memory_used = torch.cuda.max_memory_allocated() / (1024 * 1024)
@@ -321,7 +314,6 @@ def training_pipeline(
     val_err = 1 - (correct / total)
     _val_end = time.time()
 
-
     print(f"Accuracy of the network on the 10000 test images: {val_accuracy}")
 
     full_fidelity_results = full_fidelity_training_pipeline(
@@ -332,7 +324,6 @@ def training_pipeline(
         beta2=beta2,
         optimizer=optimizer_name,
     )
-
     # Logging
     if log_tensorboard:
         tblogger.log(
@@ -386,6 +377,11 @@ def training_pipeline(
                 p.numel() for p in filter(lambda p: p.requires_grad, model.parameters())
             ),
             "n_total_params": sum(p.numel() for p in model.parameters()),
+            "perc_trainable_params": (
+                sum(p.numel() for p in filter(lambda p: p.requires_grad, model.parameters()))
+                / sum(p.numel() for p in model.parameters())
+            )
+            * 100,
         },
     }
 
@@ -404,7 +400,6 @@ def get_best_config(config_data_path: str, best_config_id: int) -> pd.DataFrame:
     best_config = {
         "beta1": best_config_row["config.beta1"].values[0],
         "beta2": best_config_row["config.beta2"].values[0],
-        "dropout_rate": best_config_row["config.dropout_rate"].values[0],
         "learning_rate": best_config_row["config.learning_rate"].values[0],
         "optimizer": best_config_row["config.optimizer"].values[0],
         "weight_decay": best_config_row["config.weight_decay"].values[0],
@@ -435,12 +430,11 @@ if __name__ == "__main__":
         )
 
     pipeline_space = {
-        "learning_rate": neps.Float(1e-5, 1e-1, log=True, default=0.008),
-        "beta1": neps.Float(0.9, 0.999, log=True, default=0.9),
-        "beta2": neps.Float(0.9, 0.999, log=True, default=0.999),
-        "weight_decay": neps.Float(1e-5, 0.1, log=True, default=0.01),
-        "optimizer_name": neps.Categorical(["adam", "sgd"], default="adam"),
-        "dropout_rate": neps.Float(0.0, 0.8, default=0.0),
+        "learning_rate": neps.Categorical(choices=[1e-5, 1e-4, 1e-3, 1e-2, 1e-1]),
+        "beta1": neps.Categorical(choices=[0.9, 0.95, 0.99]),
+        "beta2": neps.Categorical(choices=[0.9, 0.95, 0.99]),
+        "weight_decay": neps.Categorical(choices=[1e-5, 1e-4, 1e-3, 1e-2, 1e-1]),
+        "optimizer_name": neps.Categorical(choices=["adam", "sgd"]),
     }
 
     root_directory = Path(git.Repo(".", search_parent_directories=True).working_tree_dir) / "output"
@@ -450,11 +444,12 @@ if __name__ == "__main__":
         except FileExistsError:
             print("Directory already exists")
 
-    algo = "random_search"
     output_tree = (
         f"{args.nodes}nodes_{args.cpus_per_node}cpus_"
         f"{args.gpus_per_node}gpus_{args.n_unfrozen_layers}unfrozen"
     )
+
+    algo = GridSearch
 
     # TODO: set seed for reproducibility across torch and numpy
     neps.run(
@@ -466,6 +461,6 @@ if __name__ == "__main__":
         ),
         searcher=algo,
         max_evaluations_total=250,
-        root_directory=(f"{root_directory}/{args.group_name}/{algo}/{output_tree}/"),
+        root_directory=(f"{root_directory}/{args.group_name}/{algo.__name__}/{output_tree}/"),
         overwrite_working_directory=False,
     )

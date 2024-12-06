@@ -1,8 +1,8 @@
 #!/bin/bash
 
-#SBATCH -c 4
-#SBATCH --gres=gpu:1
-#SBATCH --nodes=8
+#SBATCH -c 16
+#SBATCH --gres=gpu:8
+#SBATCH --nodes=1
 #SBATCH --mem-per-gpu=16G
 
 #SBATCH --job-name=hpo_freezing
@@ -11,8 +11,8 @@
 #SBATCH --error=./logs/%j_%a_%N_log.err
 #SBATCH --output=./logs/%j_%a_%N_log.out
 
-#SBATCH --partition=alldlc_gpu-rtx2080
-#SBATCH --time=24:00:00  # in minutes, 60=1 hour, 1440=1 day, 10800=1 week
+#SBATCH --partition=bosch_gpu-rtx2080
+#SBATCH --time=48:00:00  # in minutes, 60=1 hour, 1440=1 day, 10800=1 week
 #SBATCH --exclude=dlcgpu28,dlcgpu35,mlgpu09
 #SBATCH --mail-type=FAIL
 
@@ -36,11 +36,11 @@ n_unfrozen_layers=$2
 srun --unbuffered \
     --ntasks 8 \
     --gpus-per-task 1 \
-    --cpus-per-task 4 \
-    python layer_freeze/simple_cnn_cifar10.py \
-        --nodes 8 \
-        --gpus_per_node 1 \
-        --cpus_per_node 4 \
+    --cpus-per-task 2 \
+    python layer_freeze/simple_cnn_cifar10_hp_grid.py \
+        --nodes 1 \
+        --gpus_per_node 8 \
+        --cpus_per_node 16 \
         --group_name $group_name \
         --n_unfrozen_layers $n_unfrozen_layers
 
