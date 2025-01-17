@@ -23,7 +23,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff", "pre-commit"]
+dev = [
+    "ruff",
+    "pre-commit",
+]
 
 [tool.setuptools.packages.find]
 include = ["layer_freeze*"]
