@@ -13,6 +13,7 @@ def create_model(num_classes: int = 10) -> nn.Module:
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
 
+
 def data_prep(batch_size: int, get_val_set: bool = True) -> tuple:
     """Prepare CIFAR10 dataset for training and testing."""
     # Define dataset specific transforms and classes
@@ -51,7 +52,8 @@ def data_prep(batch_size: int, get_val_set: bool = True) -> tuple:
 
     return trainloader, validloader, testloader, num_classes
 
-def full_fidelity_training_pipeline(
+
+def full_fidelity_training(
     epochs: int = 10,
     batch_size: int = 1024,
     learning_rate: float = 0.008,
@@ -62,7 +64,7 @@ def full_fidelity_training_pipeline(
 ) -> dict:
     """Main training interface for HPO."""
     # Prepare data
-    trainloader, validloader, testloader, num_classes = data_prep(batch_size=batch_size)
+    trainloader, validloader, _, num_classes = data_prep(batch_size=batch_size)
 
     # Define model with new parameters
     model = create_model(num_classes=num_classes)
@@ -86,9 +88,6 @@ def full_fidelity_training_pipeline(
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer}")
 
-    # Loading potential checkpoint
-    start_epoch = 1
-
     if torch.cuda.is_available():
         model = model.cuda()
 
@@ -97,12 +96,9 @@ def full_fidelity_training_pipeline(
     forward_times = []
     backward_times = []
     model.train()
-    for epoch in range(start_epoch, epochs + 1):
+    for _ in range(epochs):
         running_loss = 0.0
-        for batch_idx, (data, target) in enumerate(
-            tqdm(trainloader, desc=f"Epoch {epoch}", leave=False, disable=True), 0
-        ):
-            # zero the parameter gradients
+        for data, target in trainloader:
             optimizer.zero_grad()
 
             # forward + backward + optimize
@@ -126,23 +122,19 @@ def full_fidelity_training_pipeline(
 
             # print statistics
             running_loss += loss.item()
-        training_loss_for_epoch = running_loss / (batch_idx + 1)
     _end = time.time()
 
     # Validation loop
     correct = 0
     total = 0
     model.eval()
-    # since we're not training, we don't need to calculate the gradients for our outputs
     with torch.no_grad():
         for data in validloader:
             images, labels = data
             if torch.cuda.is_available():
                 images = images.cuda()
                 labels = labels.cuda()
-            # calculate outputs by running images through the network
             outputs = model(images)
-            # the class with the highest energy is what we choose as prediction
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()

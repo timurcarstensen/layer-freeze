@@ -1,181 +1,28 @@
-"""Example adapted from https://pytorch.org/tutorials/beginner/blitz/cifar10_tutorial.html"""
-
 import argparse
 import logging
 import os
 import time
-import warnings
 from functools import partial
 from pathlib import Path
 
+import git
+import neps
 import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from neps.plot.tensorboard_eval import SummaryWriter_, tblogger
 
-warnings.filterwarnings("ignore", category=UserWarning)
-
-import git  # noqa: E402
-import neps  # noqa: E402
-import torch  # noqa: E402
-import torch.nn as nn  # noqa: E402
-import torch.optim as optim  # noqa: E402
-import torchvision  # noqa: E402
-import torchvision.transforms as transforms  # noqa: E402
-from neps.optimizers import GridSearch  # noqa: E402
-from neps.plot.tensorboard_eval import tblogger  # noqa: E402
-from neps.search_spaces import SearchSpace  # noqa: E402
-from tqdm import tqdm  # noqa: E402
-
-from layer_freeze.freeze_layers import freeze_layers  # noqa: E402
-
-
-def create_model(num_classes: int = 10) -> nn.Module:
-    model = torchvision.models.resnet18(weights=None)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
-    return model
-
-
-def data_prep(batch_size: int, get_val_set: bool = True) -> tuple:
-    """Prepare CIFAR10 dataset for training and testing."""
-    # Define dataset specific transforms and classes
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(degrees=15),
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-            transforms.RandomPerspective(distortion_scale=0.2, p=0.5),
-        ]
-    )
-    dataset_class = torchvision.datasets.CIFAR10
-    num_classes = 10
-
-    trainset = dataset_class(root="./data", train=True, download=True, transform=transform)
-    testset = dataset_class(root="./data", train=False, download=True, transform=transform)
-
-    if get_val_set:
-        train_size = len(trainset) - 10000  # Reserve 10k samples for validation
-        train_set, val_set = torch.utils.data.random_split(trainset, [train_size, 10000])
-        validloader = torch.utils.data.DataLoader(
-            val_set, batch_size=batch_size, shuffle=False, num_workers=4
-        )
-    else:
-        train_set = trainset
-        validloader = None
-
-    trainloader = torch.utils.data.DataLoader(
-        train_set, batch_size=batch_size, shuffle=True, num_workers=4
-    )
-    testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch_size, shuffle=False, num_workers=4
-    )
-
-    return trainloader, validloader, testloader, num_classes
-
-
-def full_fidelity_training_pipeline(
-    epochs: int = 10,
-    batch_size: int = 1024,
-    learning_rate: float = 0.008,
-    weight_decay: float = 0.01,
-    beta1: float = 0.9,
-    beta2: float = 0.999,
-    optimizer: str = "adam",
-) -> dict:
-    """Main training interface for HPO."""
-    # Prepare data
-    trainloader, validloader, testloader, num_classes = data_prep(batch_size=batch_size)
-
-    # Define model with new parameters
-    model = create_model(num_classes=num_classes)
-
-    # Define loss function and optimizer
-    criterion = nn.CrossEntropyLoss()
-    if optimizer.lower() == "adam":
-        optimizer = optim.Adam(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=learning_rate,
-            betas=[beta1, beta2],
-            weight_decay=weight_decay,
-        )
-    elif optimizer.lower() == "sgd":
-        optimizer = optim.SGD(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=learning_rate,
-            momentum=beta1,
-            weight_decay=weight_decay,
-        )
-    else:
-        raise ValueError(f"Unsupported optimizer: {optimizer}")
-
-    # Loading potential checkpoint
-    start_epoch = 1
-
-    if torch.cuda.is_available():
-        model = model.cuda()
-
-    # Training loop
-    _start = time.time()
-    forward_times = []
-    backward_times = []
-    model.train()
-    for epoch in range(start_epoch, epochs + 1):
-        running_loss = 0.0
-        for batch_idx, (data, target) in enumerate(
-            tqdm(trainloader, desc=f"Epoch {epoch}", leave=False, disable=True), 0
-        ):
-            # zero the parameter gradients
-            optimizer.zero_grad()
-
-            # forward + backward + optimize
-            if torch.cuda.is_available():
-                data = data.cuda()
-                target = target.cuda()
-
-            forward_start = time.time()
-            outputs = model(data)
-            forward_end = time.time()
-            forward_times.append(forward_end - forward_start)
-
-            loss = criterion(outputs, target)
-
-            backward_start = time.time()
-            loss.backward()
-            backward_end = time.time()
-            backward_times.append(backward_end - backward_start)
-
-            optimizer.step()
-
-            # print statistics
-            running_loss += loss.item()
-        training_loss_for_epoch = running_loss / (batch_idx + 1)
-    _end = time.time()
-
-    # Validation loop
-    correct = 0
-    total = 0
-    model.eval()
-    # since we're not training, we don't need to calculate the gradients for our outputs
-    with torch.no_grad():
-        for data in validloader:
-            images, labels = data
-            if torch.cuda.is_available():
-                images = images.cuda()
-                labels = labels.cuda()
-            # calculate outputs by running images through the network
-            outputs = model(images)
-            # the class with the highest energy is what we choose as prediction
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-    val_accuracy = 100 * correct / total
-    val_err = 1 - (correct / total)
-
-    return {
-        "val_err": val_err,
-        "val_acc": val_accuracy,
-        "cost": _end - _start,
-    }
+# import wandb
+from layer_freeze.freeze_layers import freeze_layers
+from layer_freeze.logging.test import (
+    mean_l1_weight_norm,
+    mean_l2_weight_norm,
+    optimizer_stats,
+    output_logits_max,
+    output_logits_mean,
+)
+from layer_freeze.resnet.utils import create_model, data_prep
 
 
 def training_pipeline(
@@ -195,6 +42,7 @@ def training_pipeline(
     # reset memory stats
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.empty_cache()
+    print("pipeline directory: ", pipeline_directory)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -209,22 +57,23 @@ def training_pipeline(
 
     # Define loss function and optimizer
     criterion = nn.CrossEntropyLoss()
-    if optimizer_name.lower() == "adam":
-        optimizer = optim.Adam(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=learning_rate,
-            betas=[beta1, beta2],
-            weight_decay=weight_decay,
-        )
-    elif optimizer_name.lower() == "sgd":
-        optimizer = optim.SGD(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=learning_rate,
-            momentum=beta1,
-            weight_decay=weight_decay,
-        )
-    else:
-        raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+    match optimizer_name.lower():
+        case "adam":
+            optimizer = optim.Adam(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                lr=learning_rate,
+                betas=(beta1, beta2),
+                weight_decay=weight_decay,
+            )
+        case "sgd":
+            optimizer = optim.SGD(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                lr=learning_rate,
+                momentum=beta1,
+                weight_decay=weight_decay,
+            )
+        case _:
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
     # Loading potential checkpoint
     start_epoch = 1
@@ -236,9 +85,11 @@ def training_pipeline(
     forward_times = []
     backward_times = []
     model.train()
-    for _ in range(start_epoch, epochs + 1):
+    step = 0
+    for epoch in range(start_epoch, epochs + 1):
         running_loss = 0.0
         for i, (data, target) in enumerate(trainloader):  # noqa: B007
+            step += 1
             # zero the parameter gradients
             optimizer.zero_grad()
 
@@ -256,6 +107,21 @@ def training_pipeline(
             loss.backward()
             optimizer.step()
             backward_times.append(time.time() - backward_start)
+
+            tblogger.log(
+                objective_to_minimize=loss.cpu().item(),
+                current_epoch=step,
+                write_summary_incumbent=True,
+                writer_config_scalar=True,
+                writer_config_hparam=True,
+                extra_data={
+                    "output_logits_mean": tblogger.scalar_logging(output_logits_mean(outputs)),
+                    "output_logits_max": tblogger.scalar_logging(output_logits_max(outputs)),
+                    "mean_l1_weight_norm": tblogger.scalar_logging(mean_l1_weight_norm(model)),
+                    "mean_l2_weight_norm": tblogger.scalar_logging(mean_l2_weight_norm(model)),
+                    **{k: ("scalar", v) for k, v in optimizer_stats(optimizer).items()},
+                },
+            )
 
             # print statistics
             running_loss += loss.item()
@@ -301,44 +167,44 @@ def training_pipeline(
     #     optimizer=optimizer_name,
     # )
     # Logging
-    if log_tensorboard:
-        tblogger.log(
-            loss=val_err,
-            current_epoch=epochs,
-            write_summary_incumbent=True,
-            writer_config_scalar=True,
-            writer_config_hparam=True,
-            extra_data={
-                "train_loss": tblogger.scalar_logging(loss.item()),
-                "val_err": tblogger.scalar_logging(val_err),
-                "val_acc": tblogger.scalar_logging(val_accuracy),
-                "n_trainable_params": tblogger.scalar_logging(
-                    sum(p.numel() for p in filter(lambda p: p.requires_grad, model.parameters()))
-                ),
-                "n_total_params": tblogger.scalar_logging(
-                    sum(p.numel() for p in model.parameters())
-                ),
-                "n_unfrozen_layers": tblogger.scalar_logging(n_unfrozen_layers),
-                "perc_trainable_params": tblogger.scalar_logging(
-                    (
-                        sum(
-                            p.numel() for p in filter(lambda p: p.requires_grad, model.parameters())
-                        )
-                        / sum(p.numel() for p in model.parameters())
-                    )
-                    * 100
-                ),
-                "gpu_memory_used_mb": tblogger.scalar_logging(memory_used),
-                "avg_forward_time_ms": tblogger.scalar_logging(avg_forward_time * 1000),
-                "avg_backward_time_ms": tblogger.scalar_logging(avg_backward_time * 1000),
-                # "full_fidelity_val_acc": tblogger.scalar_logging(full_fidelity_results["val_acc"]),
-                # "full_fidelity_val_err": tblogger.scalar_logging(full_fidelity_results["val_err"]),
-                # "full_fidelity_cost": tblogger.scalar_logging(full_fidelity_results["cost"]),
-            },
-        )
+    # if log_tensorboard:
+    #     tblogger.log(
+    #         objective_to_minimize=val_err,
+    #         current_epoch=step,
+    #         write_summary_incumbent=True,
+    #         writer_config_scalar=True,
+    #         writer_config_hparam=True,
+    #         extra_data={
+    #             "train_loss": tblogger.scalar_logging(loss.item()),
+    #             "val_err": tblogger.scalar_logging(val_err),
+    #             "val_acc": tblogger.scalar_logging(val_accuracy),
+    #             "n_trainable_params": tblogger.scalar_logging(
+    #                 sum(p.numel() for p in filter(lambda p: p.requires_grad, model.parameters()))
+    #             ),
+    #             "n_total_params": tblogger.scalar_logging(
+    #                 sum(p.numel() for p in model.parameters())
+    #             ),
+    #             "n_unfrozen_layers": tblogger.scalar_logging(n_unfrozen_layers),
+    #             "perc_trainable_params": tblogger.scalar_logging(
+    #                 (
+    #                     sum(
+    #                         p.numel() for p in filter(lambda p: p.requires_grad, model.parameters())
+    #                     )
+    #                     / sum(p.numel() for p in model.parameters())
+    #                 )
+    #                 * 100
+    #             ),
+    #             "gpu_memory_used_mb": tblogger.scalar_logging(memory_used),
+    #             "avg_forward_time_ms": tblogger.scalar_logging(avg_forward_time * 1000),
+    #             "avg_backward_time_ms": tblogger.scalar_logging(avg_backward_time * 1000),
+    #             # "full_fidelity_val_acc": tblogger.scalar_logging(full_fidelity_results["val_acc"]),
+    #             # "full_fidelity_val_err": tblogger.scalar_logging(full_fidelity_results["val_err"]),
+    #             # "full_fidelity_cost": tblogger.scalar_logging(full_fidelity_results["cost"]),
+    #         },
+    #     )
 
     return {
-        "loss": val_err,
+        "objective_to_minimize": val_err,
         "cost": _end - _start,
         "info_dict": {
             "train_loss": training_loss_for_epoch,
@@ -425,18 +291,16 @@ if __name__ == "__main__":
         f"{args.gpus_per_node}gpus_{args.n_unfrozen_layers}unfrozen"
     )
 
-    algo = GridSearch
-
     # TODO: set seed for reproducibility across torch and numpy
     neps.run(
-        pipeline_space=pipeline_space,
-        run_pipeline=partial(
+        evaluate_pipeline=partial(
             training_pipeline,
             log_tensorboard=True,
             n_unfrozen_layers=args.n_unfrozen_layers,
         ),
-        searcher=algo(SearchSpace(**pipeline_space), seed=42),
-        root_directory=(f"{root_directory}/{args.group_name}/{algo.__name__}/{output_tree}/"),
+        pipeline_space=pipeline_space,
+        optimizer="random_search",
+        root_directory=(f"{root_directory}/{args.group_name}/grid_search/{output_tree}/"),
         max_evaluations_total=500,
         overwrite_working_directory=False,
     )

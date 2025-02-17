@@ -7,14 +7,101 @@ from pathlib import Path
 
 import git
 import neps
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision
-import torchvision.transforms as transforms
 from neps.plot.tensorboard_eval import tblogger
-from tqdm import tqdm
+
+from layer_freeze.freeze_layers import freeze_layers
+from layer_freeze.resnet.utils import create_model, data_prep, full_fidelity_training
+
+
+def train(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    criterion: torch.nn.Module,
+    train_loader: torch.utils.data.DataLoader,
+    epochs: int = 10,
+    # n_unfrozen_layers: int = 1,
+) -> dict:
+    # Training loop
+    _start = time.time()
+    forward_times = []
+    backward_times = []
+    model.train()
+    step = 0
+    for _ in range(epochs):
+        running_loss = 0.0
+        for batch_idx, (data, target) in enumerate(train_loader):  # noqa: B007
+            step += 1
+            # zero the parameter gradients
+            optimizer.zero_grad()
+
+            # forward + backward + optimize
+            if torch.cuda.is_available():
+                data = data.cuda()
+                target = target.cuda()
+
+            forward_start = time.time()
+            logits = model(data)
+            forward_end = time.time()
+            forward_times.append(forward_end - forward_start)
+
+            loss = criterion(logits, target)
+
+            backward_start = time.time()
+            loss.backward()
+            optimizer.step()
+            backward_end = time.time()
+            backward_times.append(backward_end - backward_start)
+
+            # print statistics
+            running_loss += loss.item()
+        # print(f'[epoch={epoch},batch={batch_idx+1:<5d}]\tloss: {running_loss / (batch_idx+1):.6f}')
+        training_loss_for_epoch = running_loss / (batch_idx + 1)
+    _end = time.time()
+
+    memory_used = torch.cuda.max_memory_allocated() / (1024 * 1024)
+
+    avg_forward_time = sum(forward_times) / len(forward_times)
+    avg_backward_time = sum(backward_times) / len(backward_times)
+
+    return {
+        "loss": training_loss_for_epoch,
+        "cost": _end - _start,
+        "info_dict": {
+            "train_loss": training_loss_for_epoch,
+            "gpu_memory_used_mb": memory_used,
+            "avg_forward_time_ms": avg_forward_time * 1000,
+            "avg_backward_time_ms": avg_backward_time * 1000,
+        },
+    }
+
+
+def validate(
+    model: torch.nn.Module,
+    val_loader: torch.utils.data.DataLoader,
+) -> dict:
+    correct = 0
+    total = 0
+    start = time.time()
+    model.eval()
+
+    with torch.no_grad():
+        for images, labels in val_loader:
+            if torch.cuda.is_available():
+                images = images.cuda()
+                labels = labels.cuda()
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    return {
+        "val_err": 1 - (correct / total),
+        "val_acc": 100 * correct / total,
+        "val_time": time.time() - start,
+    }
 
 
 def training_pipeline(
@@ -29,9 +116,11 @@ def training_pipeline(
     beta2: float = 0.999,
     optimizer_name: str = "adam",
     log_tensorboard: bool = True,
-    dropout_rate: float = 0.0,
 ) -> dict:
     """Main training interface for HPO."""
+    # init logger
+    logger = tblogger()
+    logger.initialize_writers()
     # reset memory stats
     torch.cuda.reset_peak_memory_stats()
 
@@ -69,7 +158,6 @@ def training_pipeline(
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
     # Loading potential checkpoint
-    start_epoch = 1
     if previous_pipeline_directory is not None:
         if (Path(previous_pipeline_directory) / "checkpoint.pt").exists():
             states = torch.load(
@@ -82,75 +170,16 @@ def training_pipeline(
     if torch.cuda.is_available():
         model = model.cuda()
 
-    # Training loop
-    _start = time.time()
-    forward_times = []
-    backward_times = []
-    model.train()
-    for epoch in range(start_epoch, epochs + 1):
-        running_loss = 0.0
-        for batch_idx, (data, target) in enumerate(
-            tqdm(trainloader, desc=f"Epoch {epoch}", leave=False, disable=True), 0
-        ):
-            # zero the parameter gradients
-            optimizer.zero_grad()
+    train_results = train(
+        model=model,
+        optimizer=optimizer,
+        criterion=criterion,
+        train_loader=trainloader,
+        epochs=epochs,
+    )
+    validation_results = validate(model=model, val_loader=validloader)
 
-            # forward + backward + optimize
-            if torch.cuda.is_available():
-                data = data.cuda()
-                target = target.cuda()
-
-            forward_start = time.time()
-            outputs = model(data)
-            forward_end = time.time()
-            forward_times.append(forward_end - forward_start)
-
-            loss = criterion(outputs, target)
-
-            backward_start = time.time()
-            loss.backward()
-            optimizer.step()
-            backward_end = time.time()
-            backward_times.append(backward_end - backward_start)
-
-            # print statistics
-            running_loss += loss.item()
-        # print(f'[epoch={epoch},batch={batch_idx+1:<5d}]\tloss: {running_loss / (batch_idx+1):.6f}')
-        print(f"epoch={epoch:<2d}\tloss: {running_loss / (batch_idx + 1):.6f}")
-        training_loss_for_epoch = running_loss / (batch_idx + 1)
-    _end = time.time()
-
-    memory_used = torch.cuda.max_memory_allocated() / (1024 * 1024)
-
-    avg_forward_time = sum(forward_times) / len(forward_times)
-    avg_backward_time = sum(backward_times) / len(backward_times)
-
-    # Validation loop
-    correct = 0
-    total = 0
-    _val_start = time.time()
-    model.eval()
-    # since we're not training, we don't need to calculate the gradients for our outputs
-    with torch.no_grad():
-        for data in validloader:
-            images, labels = data
-            if torch.cuda.is_available():
-                images = images.cuda()
-                labels = labels.cuda()
-            # calculate outputs by running images through the network
-            outputs = model(images)
-            # the class with the highest energy is what we choose as prediction
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-    val_accuracy = 100 * correct / total
-    val_err = 1 - (correct / total)
-    _val_end = time.time()
-
-    print(f"Accuracy of the network on the 10000 test images: {val_accuracy}")
-
-    full_fidelity_results = full_fidelity_training_pipeline(
+    full_fidelity_results = full_fidelity_training(
         batch_size=batch_size,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
@@ -162,15 +191,15 @@ def training_pipeline(
     # Logging
     if log_tensorboard:
         tblogger.log(
-            loss=val_err,
+            loss=validation_results["val_err"],
             current_epoch=epochs,
             write_summary_incumbent=True,
             writer_config_scalar=True,
             writer_config_hparam=True,
             extra_data={
-                "train_loss": tblogger.scalar_logging(loss.item()),
-                "val_err": tblogger.scalar_logging(val_err),
-                "val_acc": tblogger.scalar_logging(val_accuracy),
+                "train_loss": tblogger.scalar_logging(train_results["loss"]),
+                "val_err": tblogger.scalar_logging(validation_results["val_err"]),
+                "val_acc": tblogger.scalar_logging(validation_results["val_acc"]),
                 "n_trainable_params": tblogger.scalar_logging(
                     sum(p.numel() for p in filter(lambda p: p.requires_grad, model.parameters()))
                 ),
@@ -187,9 +216,15 @@ def training_pipeline(
                     )
                     * 100
                 ),
-                "gpu_memory_used_mb": tblogger.scalar_logging(memory_used),
-                "avg_forward_time_ms": tblogger.scalar_logging(avg_forward_time * 1000),
-                "avg_backward_time_ms": tblogger.scalar_logging(avg_backward_time * 1000),
+                "gpu_memory_used_mb": tblogger.scalar_logging(
+                    train_results["info_dict"]["gpu_memory_used_mb"]
+                ),
+                "avg_forward_time_ms": tblogger.scalar_logging(
+                    train_results["info_dict"]["avg_forward_time_ms"]
+                ),
+                "avg_backward_time_ms": tblogger.scalar_logging(
+                    train_results["info_dict"]["avg_backward_time_ms"]
+                ),
                 "full_fidelity_val_acc": tblogger.scalar_logging(full_fidelity_results["val_acc"]),
                 "full_fidelity_val_err": tblogger.scalar_logging(full_fidelity_results["val_err"]),
                 "full_fidelity_cost": tblogger.scalar_logging(full_fidelity_results["cost"]),
@@ -214,28 +249,6 @@ def training_pipeline(
             "n_total_params": sum(p.numel() for p in model.parameters()),
         },
     }
-
-
-def get_best_config_id(run_status_path: str) -> int:
-    run_status_df = pd.read_csv(run_status_path)
-    best_config_id = run_status_df.loc[
-        run_status_df["description"] == "best_config_id", "value"
-    ].values[0]
-    return int(best_config_id)
-
-
-def get_best_config(config_data_path: str, best_config_id: int) -> pd.DataFrame:
-    config_data_df = pd.read_csv(config_data_path)
-    best_config_row = config_data_df[config_data_df["config_id"] == best_config_id]
-    best_config = {
-        "beta1": best_config_row["config.beta1"].values[0],
-        "beta2": best_config_row["config.beta2"].values[0],
-        "dropout_rate": best_config_row["config.dropout_rate"].values[0],
-        "learning_rate": best_config_row["config.learning_rate"].values[0],
-        "optimizer": best_config_row["config.optimizer"].values[0],
-        "weight_decay": best_config_row["config.weight_decay"].values[0],
-    }
-    return best_config
 
 
 if __name__ == "__main__":
