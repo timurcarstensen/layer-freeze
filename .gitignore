@@ -6,6 +6,7 @@
 **/neps
 **/data
 **/output
+**/plotting_output
 
 # macOS
 .DS_Store
