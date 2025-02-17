@@ -8,16 +8,16 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from torch.optim import Adam
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from tqdm import tqdm, trange
 
 from layer_freeze.freeze_layers import freeze_layers
 
 
-def measure_timings(model, dataloader, device, n_forward_passes=3) -> Tuple[float, float, float]:
+def measure_timings(model, dataloader, device, n_forward_passes=3, desc="Forward passes") -> tuple[float, float, float]:
     optimizer_adam = Adam(model.parameters(), lr=0.001)
     tmp_forward_time = []
     tmp_backward_time = []
-    for _ in range(n_forward_passes):
+    for _ in trange(n_forward_passes, desc=desc):
         for inputs, labels in dataloader:
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer_adam.zero_grad()
@@ -48,10 +48,12 @@ if __name__ == "__main__":
     parser.add_argument("--max_layers", type=int, default=53)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--n_workers", type=int, default=4)
-    parser.add_argument("--n_forward_passes", type=int, default=3)
+    parser.add_argument("--n_warmup_passes", type=int, default=3)
     args = parser.parse_args()
     max_layers = args.max_layers
     batch_size = args.batch_size
+    n_workers = args.n_workers
+    n_warmup_passes = args.n_warmup_passes
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -65,35 +67,35 @@ if __name__ == "__main__":
         batch_size=batch_size,
         shuffle=False,
         num_workers=args.n_workers,
-        pin_memory=False,
-        prefetch_factor=1,
+        pin_memory=True,
+        prefetch_factor=3,
         persistent_workers=False,
+        pin_memory_device="cuda",
     )
 
     memory_usage = []
     perc_frozen = []
     backward_time = []
     forward_time = []
+    model = models.resnet18(weights=None)
     for i in tqdm(range(1, max_layers)):
-        model = models.resnet18(weights=None)
         frozen_params, total_params = freeze_layers(model, i, return_param_stats=True)
         perc_frozen.append(frozen_params / total_params)
         model = model.to(device)
         optimizer_adam = Adam(model.parameters(), lr=0.001)
 
-        for _ in range(args.n_forward_passes):
-            _ = measure_timings(
-                model, dataloader, device, args.n_forward_passes
-            )
+        _ = measure_timings(
+            model, dataloader, device, args.n_warmup_passes, desc="Warmup passes"
+        )
 
         fwd_time, bwd_time, mem_usage = measure_timings(
-            model, dataloader, device, args.n_forward_passes
+            model, dataloader, device, 10, desc="Forward passes"
         )
         forward_time.append(fwd_time)
         backward_time.append(bwd_time)
         memory_usage.append(mem_usage)
 
-        del model
+        # del model
         del optimizer_adam
 
     # Plot percentage of frozen parameters vs memory usage
