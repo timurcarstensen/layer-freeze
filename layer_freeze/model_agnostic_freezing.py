@@ -42,6 +42,21 @@ class FrozenModel(nn.Module):
         unwrap: Any = None,
         print_summary: bool = False,
     ) -> None:
+        """Initialize a FrozenModel that wraps a base model and freezes some of its layers.
+
+        Args:
+            base_model (nn.Module): The PyTorch model to wrap and partially freeze
+            n_trainable (int | str, optional): Number of layers to keep trainable, counting from the end.
+                If "all", keeps all layers trainable. Defaults to 1.
+            unwrap (Any, optional): A class/type to unwrap during layer traversal. If a layer matches
+                this type, its children will be traversed instead of treating it as a leaf node.
+                Defaults to None.
+            print_summary (bool, optional): Whether to print a summary of frozen/trainable layers
+                and parameter counts after initialization. Defaults to False.
+
+        Raises:
+            ValueError: If n_trainable is greater than the number of layers with parameters
+        """
         super().__init__()
         self.n_trainable = n_trainable
         self.base_model = base_model
@@ -70,22 +85,19 @@ class FrozenModel(nn.Module):
 
         self.all_layers = all_layers  # Store as instance variable
 
-        self.n_layers_with_params = sum(
-            1 for _, has_params in self.all_layers if has_params
-        )
+        n_layers_with_params = sum(1 for _, has_params in self.all_layers if has_params)
 
-        if isinstance(n_trainable, int):
-            if n_trainable > self.n_layers_with_params:
-                raise ValueError(
-                    f"n_trainable is greater than the number of trainable layers: "
-                    f"{self.n_layers_with_params}"
-                )
-
-            self.frozen, self.trainable = self._split_layers_and_freeze(
-                self.all_layers, n_trainable
+        if n_trainable > n_layers_with_params:
+            raise ValueError(
+                f"n_trainable is greater than the number of trainable layers: "
+                f"{n_layers_with_params}"
             )
 
-            assert len(self.frozen) + len(self.trainable) == len(self.all_layers)
+        self.frozen, self.trainable = self._split_layers_and_freeze(
+            self.all_layers, n_trainable
+        )
+
+        assert len(self.frozen) + len(self.trainable) == len(self.all_layers)
 
         if print_summary:
             self.print_layers(frozen=self.frozen, trainable=self.trainable)
