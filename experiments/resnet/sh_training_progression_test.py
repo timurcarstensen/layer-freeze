@@ -6,11 +6,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.utils.data
+import wandb
 from torchvision import models
 from tqdm import tqdm
 
-import wandb
-from layer_freeze.resnet.utils import data_prep, validate
+from .utils import data_prep, validate
 
 
 class FrozenModel(nn.Module):
