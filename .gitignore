@@ -11,7 +11,8 @@
 **/wandb
 
 # macOS
-.DS_Store
+**/.DS_Store
+!results/model_perf/data
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
