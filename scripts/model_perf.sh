@@ -28,7 +28,7 @@ for model in resnet18 resnet34 resnet50 resnet101 resnet152; do
             --ntasks 1 \
             --gpus-per-task 1 \
             --cpus-per-task 16 \
-            python layer_freeze/freeze_layers.py \
+            python experiments/measure_plot_model_training_hw_metrics.py \
                 --base_model $model \
                 --batch_size $batch_size
     done
