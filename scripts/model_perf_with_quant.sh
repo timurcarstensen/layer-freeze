@@ -8,8 +8,8 @@
 #SBATCH --job-name=model_perf
 #SBATCH --open-mode=append  # important for multiple processes to share a log file
 
-#SBATCH --error=./slurm_logs/%j_%a_%N_log.err
-#SBATCH --output=./slurm_logs/%j_%a_%N_log.out
+#SBATCH --error=./logs/slurm_logs/%j_%a_%N_log.err
+#SBATCH --output=./logs/slurm_logs/%j_%a_%N_log.out
 
 #SBATCH --partition=mldlc2_gpu-l40s
 #SBATCH --time=8:00:00  # in minutes, 60=1 hour, 1440=1 day, 10800=1 week
