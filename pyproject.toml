@@ -9,16 +9,17 @@ description = "A tool for hyperparameter optimization using successive halving"
 authors = [{ name = "Timur Michael Carstensen", email = "timurcarstensen@gmail.com" }]
 license = { file = "LICENSE" }
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "rich",
     "torch>=2.0.0",
     "torchvision>=0.15.0",
-    "neural-pipeline-search@git+https://github.com/automl/neps.git",
+    # "neural-pipeline-search@git+https://github.com/automl/neps.git",
     "mup",
     "GitPython",
 ]
