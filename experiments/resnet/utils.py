@@ -5,7 +5,28 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-from tqdm import tqdm
+
+
+def validate(
+    model: torch.nn.Module,
+    validloader: torch.utils.data.DataLoader,
+    device: torch.device,
+) -> tuple[float, float]:
+    """Validate the model on the validation set."""
+    model.eval()
+    total = 0
+    correct = 0
+    with torch.no_grad():
+        start = time.perf_counter()
+        for data, target in validloader:
+            data, target = data.to(device), target.to(device)
+
+            outputs = model(data)
+            _, predicted = torch.max(outputs.data, 1)
+            total += target.size(0)
+            correct += (predicted == target).sum().item()
+        end = time.perf_counter()
+    return 1 - (correct / total), end - start
 
 
 def create_model(num_classes: int = 10) -> nn.Module:
@@ -14,7 +35,12 @@ def create_model(num_classes: int = 10) -> nn.Module:
     return model
 
 
-def data_prep(batch_size: int, get_val_set: bool = True) -> tuple:
+def data_prep(
+    batch_size: int,
+    get_val_set: bool = True,
+    dataloader_workers: int = 4,
+    prefetch_factor: int | None = None,
+) -> tuple:
     """Prepare CIFAR10 dataset for training and testing."""
     # Define dataset specific transforms and classes
     transform = transforms.Compose(
@@ -37,17 +63,35 @@ def data_prep(batch_size: int, get_val_set: bool = True) -> tuple:
         train_size = len(trainset) - 10000  # Reserve 10k samples for validation
         train_set, val_set = torch.utils.data.random_split(trainset, [train_size, 10000])
         validloader = torch.utils.data.DataLoader(
-            val_set, batch_size=batch_size, shuffle=False, num_workers=4
+            val_set,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=dataloader_workers,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=prefetch_factor,
         )
     else:
         train_set = trainset
         validloader = None
 
     trainloader = torch.utils.data.DataLoader(
-        train_set, batch_size=batch_size, shuffle=True, num_workers=4
+        train_set,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=dataloader_workers,
+        persistent_workers=True,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
     )
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch_size, shuffle=False, num_workers=4
+        testset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=dataloader_workers,
+        persistent_workers=True,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
     )
 
     return trainloader, validloader, testloader, num_classes

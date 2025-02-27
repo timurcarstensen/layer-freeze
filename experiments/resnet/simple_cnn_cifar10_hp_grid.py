@@ -11,18 +11,11 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from neps.plot.tensorboard_eval import SummaryWriter_, tblogger
+from neps.plot.tensorboard_eval import tblogger
 
-# import wandb
-from layer_freeze.freeze_layers import freeze_layers
-from layer_freeze.logging.test import (
-    mean_l1_weight_norm,
-    mean_l2_weight_norm,
-    optimizer_stats,
-    output_logits_max,
-    output_logits_mean,
-)
-from layer_freeze.resnet.utils import create_model, data_prep
+from layer_freeze.model_agnostic_freezing import FrozenModel
+
+from .utils import create_model, data_prep
 
 
 def training_pipeline(
@@ -36,13 +29,11 @@ def training_pipeline(
     beta1: float = 0.9,
     beta2: float = 0.999,
     optimizer_name: str = "adam",
-    log_tensorboard: bool = True,
 ) -> dict:
     """Main training interface for HPO."""
     # reset memory stats
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.empty_cache()
-    print("pipeline directory: ", pipeline_directory)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -53,7 +44,12 @@ def training_pipeline(
     model = create_model(num_classes=num_classes)
 
     # freeze layers
-    freeze_layers(model=model, n_unfrozen_layers=n_unfrozen_layers)
+    model = FrozenModel(
+        n_classes=num_classes,
+        n_trainable=n_unfrozen_layers,
+        base_model=model,
+        quantize_frozen_layers=False,
+    )
 
     # Define loss function and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -86,7 +82,7 @@ def training_pipeline(
     backward_times = []
     model.train()
     step = 0
-    for epoch in range(start_epoch, epochs + 1):
+    for _epoch in range(start_epoch, epochs + 1):
         running_loss = 0.0
         for i, (data, target) in enumerate(trainloader):  # noqa: B007
             step += 1
@@ -114,13 +110,6 @@ def training_pipeline(
                 write_summary_incumbent=True,
                 writer_config_scalar=True,
                 writer_config_hparam=True,
-                extra_data={
-                    "output_logits_mean": tblogger.scalar_logging(output_logits_mean(outputs)),
-                    "output_logits_max": tblogger.scalar_logging(output_logits_max(outputs)),
-                    "mean_l1_weight_norm": tblogger.scalar_logging(mean_l1_weight_norm(model)),
-                    "mean_l2_weight_norm": tblogger.scalar_logging(mean_l2_weight_norm(model)),
-                    **{k: ("scalar", v) for k, v in optimizer_stats(optimizer).items()},
-                },
             )
 
             # print statistics
@@ -152,56 +141,9 @@ def training_pipeline(
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
-    val_accuracy = 100 * correct / total
+    100 * correct / total
     val_err = 1 - (correct / total)
     _val_end = time.time()
-
-    # print(f"Accuracy of the network on the 10000 test images: {val_accuracy}")
-
-    # full_fidelity_results = full_fidelity_training_pipeline(
-    #     batch_size=batch_size,
-    #     learning_rate=learning_rate,
-    #     weight_decay=weight_decay,
-    #     beta1=beta1,
-    #     beta2=beta2,
-    #     optimizer=optimizer_name,
-    # )
-    # Logging
-    # if log_tensorboard:
-    #     tblogger.log(
-    #         objective_to_minimize=val_err,
-    #         current_epoch=step,
-    #         write_summary_incumbent=True,
-    #         writer_config_scalar=True,
-    #         writer_config_hparam=True,
-    #         extra_data={
-    #             "train_loss": tblogger.scalar_logging(loss.item()),
-    #             "val_err": tblogger.scalar_logging(val_err),
-    #             "val_acc": tblogger.scalar_logging(val_accuracy),
-    #             "n_trainable_params": tblogger.scalar_logging(
-    #                 sum(p.numel() for p in filter(lambda p: p.requires_grad, model.parameters()))
-    #             ),
-    #             "n_total_params": tblogger.scalar_logging(
-    #                 sum(p.numel() for p in model.parameters())
-    #             ),
-    #             "n_unfrozen_layers": tblogger.scalar_logging(n_unfrozen_layers),
-    #             "perc_trainable_params": tblogger.scalar_logging(
-    #                 (
-    #                     sum(
-    #                         p.numel() for p in filter(lambda p: p.requires_grad, model.parameters())
-    #                     )
-    #                     / sum(p.numel() for p in model.parameters())
-    #                 )
-    #                 * 100
-    #             ),
-    #             "gpu_memory_used_mb": tblogger.scalar_logging(memory_used),
-    #             "avg_forward_time_ms": tblogger.scalar_logging(avg_forward_time * 1000),
-    #             "avg_backward_time_ms": tblogger.scalar_logging(avg_backward_time * 1000),
-    #             # "full_fidelity_val_acc": tblogger.scalar_logging(full_fidelity_results["val_acc"]),
-    #             # "full_fidelity_val_err": tblogger.scalar_logging(full_fidelity_results["val_err"]),
-    #             # "full_fidelity_cost": tblogger.scalar_logging(full_fidelity_results["cost"]),
-    #         },
-    #     )
 
     return {
         "objective_to_minimize": val_err,
@@ -299,7 +241,7 @@ if __name__ == "__main__":
             n_unfrozen_layers=args.n_unfrozen_layers,
         ),
         pipeline_space=pipeline_space,
-        optimizer="random_search",
+        optimizer="grid_search",
         root_directory=(f"{root_directory}/{args.group_name}/grid_search/{output_tree}/"),
         max_evaluations_total=500,
         overwrite_working_directory=False,

@@ -12,8 +12,9 @@ import torch.nn as nn
 import torch.optim as optim
 from neps.plot.tensorboard_eval import tblogger
 
-from layer_freeze.freeze_layers import freeze_layers
-from layer_freeze.resnet.utils import create_model, data_prep, full_fidelity_training
+from layer_freeze.utils import freeze_layers
+
+from .utils import create_model, data_prep, full_fidelity_training, validate
 
 
 def train(
@@ -78,32 +79,6 @@ def train(
     }
 
 
-def validate(
-    model: torch.nn.Module,
-    val_loader: torch.utils.data.DataLoader,
-) -> dict:
-    correct = 0
-    total = 0
-    start = time.time()
-    model.eval()
-
-    with torch.no_grad():
-        for images, labels in val_loader:
-            if torch.cuda.is_available():
-                images = images.cuda()
-                labels = labels.cuda()
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-    return {
-        "val_err": 1 - (correct / total),
-        "val_acc": 100 * correct / total,
-        "val_time": time.time() - start,
-    }
-
-
 def training_pipeline(
     pipeline_directory: str,
     previous_pipeline_directory: str | None,
@@ -157,16 +132,6 @@ def training_pipeline(
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
-    # Loading potential checkpoint
-    if previous_pipeline_directory is not None:
-        if (Path(previous_pipeline_directory) / "checkpoint.pt").exists():
-            states = torch.load(
-                Path(previous_pipeline_directory) / "checkpoint.pt", weights_only=False
-            )
-            model = states["model"]
-            optimizer = states["optimizer"]
-            start_epoch = states["epochs"]
-
     if torch.cuda.is_available():
         model = model.cuda()
 
@@ -177,7 +142,7 @@ def training_pipeline(
         train_loader=trainloader,
         epochs=epochs,
     )
-    validation_results = validate(model=model, val_loader=validloader)
+    val_err, val_cost = validate(model=model, val_loader=validloader)
 
     full_fidelity_results = full_fidelity_training(
         batch_size=batch_size,
@@ -191,15 +156,14 @@ def training_pipeline(
     # Logging
     if log_tensorboard:
         tblogger.log(
-            loss=validation_results["val_err"],
+            loss=val_err,
             current_epoch=epochs,
             write_summary_incumbent=True,
             writer_config_scalar=True,
             writer_config_hparam=True,
             extra_data={
                 "train_loss": tblogger.scalar_logging(train_results["loss"]),
-                "val_err": tblogger.scalar_logging(validation_results["val_err"]),
-                "val_acc": tblogger.scalar_logging(validation_results["val_acc"]),
+                "val_err": tblogger.scalar_logging(val_err),
                 "n_trainable_params": tblogger.scalar_logging(
                     sum(p.numel() for p in filter(lambda p: p.requires_grad, model.parameters()))
                 ),
@@ -233,15 +197,13 @@ def training_pipeline(
 
     return {
         "loss": val_err,
-        "cost": _end - _start,
+        "cost": train_results["cost"],
         "info_dict": {
-            "train_loss": training_loss_for_epoch,
-            "validation_time": _val_end - _val_start,
+            "train_loss": train_results["loss"],
+            "validation_time": val_cost,
             "current_epoch": epochs,
-            "gpu_memory_used_mb": memory_used,
+            "gpu_memory_used_mb": train_results["info_dict"]["gpu_memory_used_mb"],
             "pid": os.getpid(),
-            "avg_forward_time_ms": avg_forward_time * 1000,
-            "avg_backward_time_ms": avg_backward_time * 1000,
             "full_fidelity_results": full_fidelity_results,
             "n_trainable_params": sum(
                 p.numel() for p in filter(lambda p: p.requires_grad, model.parameters())
