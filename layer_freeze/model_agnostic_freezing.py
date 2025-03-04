@@ -8,8 +8,8 @@ class FrozenModel(nn.Module):
     def __init__(
         self,
         base_model: nn.Module,
-        n_trainable: int | str = 1,
-        unwrap: Any = None,
+        n_trainable: int = 1,
+        unwrap: Any | list[Any] = None,
         print_summary: bool = False,
     ) -> None:
         """Initialize a FrozenModel that wraps a base model and freezes some of its layers.
@@ -17,7 +17,7 @@ class FrozenModel(nn.Module):
         Args:
             base_model (nn.Module): The PyTorch model to wrap and partially freeze
             n_trainable (int | str, optional): Number of layers to keep trainable, counting from the end.
-                If "all", keeps all layers trainable. Defaults to 1.
+                Defaults to 1.
             unwrap (Any, optional): A class/type to unwrap during layer traversal. If a layer matches
                 this type, its children will be traversed instead of treating it as a leaf node.
                 Defaults to None.
@@ -31,25 +31,21 @@ class FrozenModel(nn.Module):
         self.n_trainable = n_trainable
         self.base_model = base_model
 
+        # unwrap = nn.Sequential if unwrap is None else unwrap
         all_layers: list[tuple] = []
 
-        def _recursive_children(module: nn.Module, unwrap: Any | list[Any] = None) -> None:
-            for child in module.children():
-                match child:
-                    case nn.Sequential():
-                        for subchild in child.children():
-                            _recursive_children(subchild, unwrap)
-                    case unwrap() if unwrap is not None:
-                        for subchild in child.children():
-                            _recursive_children(subchild, unwrap)
-                    case _:
-                        all_layers.append((child, None))
-            if not list(module.children()):
-                all_layers.append((module, None))
+        unwrap = nn.Sequential if unwrap is None else unwrap
 
-        _recursive_children(base_model, unwrap)
+        def _recursive_children(mod: nn.Module, unwrap: Any = None) -> None:
+            if isinstance(mod, (nn.Sequential, unwrap)):
+                for child in mod.children():
+                    _recursive_children(child, unwrap)
 
-        # Update has_params flag for each layer
+            else:
+                all_layers.append((mod, None))
+
+        _recursive_children(self.base_model, unwrap)
+
         for i, (layer, _) in enumerate(all_layers):
             all_layers[i] = (layer, bool(list(layer.parameters())))
 
@@ -57,13 +53,17 @@ class FrozenModel(nn.Module):
 
         n_layers_with_params = sum(1 for _, has_params in self.all_layers if has_params)
 
+        self.max_fidelity = n_layers_with_params
+
         if n_trainable > n_layers_with_params:
             raise ValueError(
                 f"n_trainable is greater than the number of trainable layers: "
                 f"{n_layers_with_params}"
             )
 
-        self.frozen, self.trainable = self._split_layers_and_freeze(self.all_layers, n_trainable)
+        self.frozen, self.trainable = self._split_layers_and_freeze(
+            self.all_layers, n_trainable
+        )
 
         assert len(self.frozen) + len(self.trainable) == len(self.all_layers)
 
@@ -80,12 +80,14 @@ class FrozenModel(nn.Module):
             if has_params:
                 ctr += 1
 
-            if ctr > n_trainable:
+            if ctr <= n_trainable:
+                trainable.insert(0, layer)
+            else:
                 break
 
-            trainable.insert(0, layer)
-
-        frozen: list[nn.Module] = [layer for layer, _ in layers if layer not in trainable]
+        frozen: list[nn.Module] = [
+            layer for layer, _ in layers if layer not in trainable
+        ]
 
         for layer in frozen:
             for param in layer.parameters():
@@ -102,7 +104,9 @@ class FrozenModel(nn.Module):
         makes the last `n` frozen layers trainable.
         """
         self.n_trainable += n
-        self._split_layers_and_freeze(self.all_layers, self.n_trainable)
+        self.frozen, self.trainable = self._split_layers_and_freeze(
+            self.all_layers, self.n_trainable
+        )
 
     def forward(self, x):
         return self.base_model(x)
@@ -125,9 +129,10 @@ class FrozenModel(nn.Module):
             layer_info = {
                 "name": layer.__class__.__name__,
                 "num_params": num_params,
-                "trainable": False,
+                "trainable": all(not p.requires_grad for p in layer.parameters()),
             }
-            _frozen.append(layer_info)
+            if layer_info["num_params"] > 0:
+                _frozen.append(layer_info)
 
         for layer in trainable:
             num_params = sum(p.numel() for p in layer.parameters())
@@ -136,17 +141,25 @@ class FrozenModel(nn.Module):
             layer_info = {
                 "name": layer.__class__.__name__,
                 "num_params": num_params,
-                "trainable": True,
+                "trainable": all(p.requires_grad for p in layer.parameters()),
             }
-            _trainable.append(layer_info)
+            if layer_info["num_params"] > 0:
+                _trainable.append(layer_info)
 
         rich.print("\n[bold blue]Frozen Layers:[/bold blue]")
         for layer in _frozen:
-            rich.print(f"  {layer['name']}, trainable = False, params = {layer['num_params']:,}")
+            rich.print(
+                f"  {layer['name']}, trainable = False, params = {layer['num_params']:,}"
+            )
 
-        rich.print("\n[bold green]Trainable Layers:[/bold green]")
-        for layer in _trainable:
-            rich.print(f"  {layer['name']}, trainable = True, params = {layer['num_params']:,}")
+        if len(_trainable) > 0:
+            rich.print("\n[bold green]Trainable Layers:[/bold green]")
+            for layer in _trainable:
+                rich.print(
+                    f"  {layer['name']}, trainable = True, params = {layer['num_params']:,}"
+                )
+        else:
+            rich.print("[bold red]No Trainable Layers[/bold red]")
 
         total_frozen = sum(layer["num_params"] for layer in _frozen)
         total_trainable = sum(layer["num_params"] for layer in _trainable)
