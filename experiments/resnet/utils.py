@@ -35,7 +35,70 @@ def create_model(num_classes: int = 10) -> nn.Module:
     return model
 
 
-def data_prep(
+def data_prep_c100(
+    batch_size: int,
+    get_val_set: bool = True,
+    dataloader_workers: int = 4,
+    prefetch_factor: int | None = None,
+) -> tuple:
+    """Prepare CIFAR100 dataset for training and testing."""
+    # Define dataset specific transforms and classes
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(degrees=15),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+            transforms.RandomPerspective(distortion_scale=0.2, p=0.5),
+        ]
+    )
+    dataset_class = torchvision.datasets.CIFAR100
+    num_classes = 100
+
+    trainset = dataset_class(root="./data", train=True, download=True, transform=transform)
+    testset = dataset_class(root="./data", train=False, download=True, transform=transform)
+
+    if get_val_set:
+        train_size = len(trainset) - 5000  # Reserve 5k samples for validation
+        train_set, val_set = torch.utils.data.random_split(trainset, [train_size, 5000])
+        validloader = torch.utils.data.DataLoader(
+            val_set,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=dataloader_workers,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=prefetch_factor,
+        )
+    else:
+        train_set = trainset
+        validloader = None
+
+    trainloader = torch.utils.data.DataLoader(
+        train_set,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=dataloader_workers,
+        persistent_workers=True,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
+    )
+
+    testloader = torch.utils.data.DataLoader(
+        testset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=dataloader_workers,
+        persistent_workers=True,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
+    )
+
+    return trainloader, validloader, testloader, num_classes
+
+
+def data_prep_c10(
     batch_size: int,
     get_val_set: bool = True,
     dataloader_workers: int = 4,
@@ -108,7 +171,7 @@ def full_fidelity_training(
 ) -> dict:
     """Main training interface for HPO."""
     # Prepare data
-    trainloader, validloader, _, num_classes = data_prep(batch_size=batch_size)
+    trainloader, validloader, _, num_classes = data_prep_c10(batch_size=batch_size)
 
     # Define model with new parameters
     model = create_model(num_classes=num_classes)
