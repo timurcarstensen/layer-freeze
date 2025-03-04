@@ -6,7 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "layer-freeze"
 version = "0.1.0"
 description = "A tool for hyperparameter optimization using successive halving"
-authors = [{ name = "Timur Michael Carstensen", email = "timurcarstensen@gmail.com" }]
+authors = [
+    { name = "Timur Michael Carstensen", email = "timurcarstensen@gmail.com" },
+]
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,15 +22,11 @@ dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     # "neural-pipeline-search@git+https://github.com/automl/neps.git",
-    "mup",
     "GitPython",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "ruff",
-    "pre-commit",
-]
+dev = ["ruff", "pre-commit", "pytest"]
 
 [tool.setuptools.packages.find]
 include = ["layer_freeze*"]
@@ -45,4 +43,5 @@ select = ["E", "F", "I", "N", "W", "B", "C4", "PT", "RUF", "SIM", "TCH"]
 "__init__.py" = ["F401"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["layer_freeze"]
+known-first-party = ["layer_freeze", "experiments"]
+known-third-party = ["wandb"]
