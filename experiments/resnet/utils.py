@@ -68,7 +68,7 @@ def data_prep_c100(
             shuffle=False,
             num_workers=dataloader_workers,
             persistent_workers=True,
-            pin_memory=True,
+            pin_memory=False,
             prefetch_factor=prefetch_factor,
         )
     else:
@@ -81,7 +81,7 @@ def data_prep_c100(
         shuffle=True,
         num_workers=dataloader_workers,
         persistent_workers=True,
-        pin_memory=True,
+        pin_memory=False,
         prefetch_factor=prefetch_factor,
     )
 
@@ -91,7 +91,7 @@ def data_prep_c100(
         shuffle=False,
         num_workers=dataloader_workers,
         persistent_workers=True,
-        pin_memory=True,
+        pin_memory=False,
         prefetch_factor=prefetch_factor,
     )
 
@@ -131,7 +131,7 @@ def data_prep_c10(
             shuffle=False,
             num_workers=dataloader_workers,
             persistent_workers=True,
-            pin_memory=True,
+            pin_memory=False,
             prefetch_factor=prefetch_factor,
         )
     else:
@@ -144,7 +144,7 @@ def data_prep_c10(
         shuffle=True,
         num_workers=dataloader_workers,
         persistent_workers=True,
-        pin_memory=True,
+        pin_memory=False,
         prefetch_factor=prefetch_factor,
     )
     testloader = torch.utils.data.DataLoader(
@@ -153,7 +153,7 @@ def data_prep_c10(
         shuffle=False,
         num_workers=dataloader_workers,
         persistent_workers=True,
-        pin_memory=True,
+        pin_memory=False,
         prefetch_factor=prefetch_factor,
     )
 
