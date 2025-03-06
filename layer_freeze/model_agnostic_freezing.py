@@ -61,14 +61,12 @@ class FrozenModel(nn.Module):
                 f"{n_layers_with_params}"
             )
 
-        self.frozen, self.trainable = self._split_layers_and_freeze(
-            self.all_layers, n_trainable
-        )
+        self.frozen, self.trainable = self._split_layers_and_freeze(self.all_layers, n_trainable)
 
         assert len(self.frozen) + len(self.trainable) == len(self.all_layers)
 
         if print_summary:
-            self.print_layers(frozen=self.frozen, trainable=self.trainable)
+            self.print_layers()
 
     @staticmethod
     def _split_layers_and_freeze(
@@ -85,9 +83,7 @@ class FrozenModel(nn.Module):
             else:
                 break
 
-        frozen: list[nn.Module] = [
-            layer for layer, _ in layers if layer not in trainable
-        ]
+        frozen: list[nn.Module] = [layer for layer, _ in layers if layer not in trainable]
 
         for layer in frozen:
             for param in layer.parameters():
@@ -104,15 +100,17 @@ class FrozenModel(nn.Module):
         makes the last `n` frozen layers trainable.
         """
         self.n_trainable += n
-        self.frozen, self.trainable = self._split_layers_and_freeze(
-            self.all_layers, self.n_trainable
-        )
+        if not self.n_trainable > self.max_fidelity:
+            self.frozen, self.trainable = self._split_layers_and_freeze(
+                self.all_layers, self.n_trainable
+            )
+        else:
+            raise ValueError("Model already fully thawed.")
 
     def forward(self, x):
         return self.base_model(x)
 
-    @staticmethod
-    def print_layers(frozen: list[nn.Module], trainable: list[nn.Module]):
+    def print_layers(self):
         """
         Prints all layers showing their trainable status and parameter count,
         grouped by frozen/trainable status.
@@ -121,7 +119,7 @@ class FrozenModel(nn.Module):
         _trainable = []
 
         # Group layers by their trainable status
-        for layer in frozen:
+        for layer in self.frozen:
             # Count parameters and check if any are trainable
             num_params = sum(p.numel() for p in layer.parameters())
             # is_trainable = any(p.requires_grad for p in layer.parameters())
@@ -134,7 +132,7 @@ class FrozenModel(nn.Module):
             if layer_info["num_params"] > 0:
                 _frozen.append(layer_info)
 
-        for layer in trainable:
+        for layer in self.trainable:
             num_params = sum(p.numel() for p in layer.parameters())
             # is_trainable = any(p.requires_grad for p in layer.parameters())
 
@@ -148,22 +146,20 @@ class FrozenModel(nn.Module):
 
         rich.print("\n[bold blue]Frozen Layers:[/bold blue]")
         for layer in _frozen:
-            rich.print(
-                f"  {layer['name']}, trainable = False, params = {layer['num_params']:,}"
-            )
+            rich.print(f"  {layer['name']}, trainable = False, params = {layer['num_params']:,}")
 
         if len(_trainable) > 0:
             rich.print("\n[bold green]Trainable Layers:[/bold green]")
             for layer in _trainable:
-                rich.print(
-                    f"  {layer['name']}, trainable = True, params = {layer['num_params']:,}"
-                )
+                rich.print(f"  {layer['name']}, trainable = True, params = {layer['num_params']:,}")
         else:
             rich.print("[bold red]No Trainable Layers[/bold red]")
 
         total_frozen = sum(layer["num_params"] for layer in _frozen)
         total_trainable = sum(layer["num_params"] for layer in _trainable)
+        total_base_model = sum(p.numel() for p in self.base_model.parameters())
         rich.print("[bold]Summary:[/bold]")
         rich.print(f"  Total frozen parameters: {total_frozen:,}")
         rich.print(f"  Total trainable parameters: {total_trainable:,}")
         rich.print(f"  Total parameters: {total_frozen + total_trainable:,}")
+        rich.print(f"  Total base model parameters: {total_base_model:,}")
