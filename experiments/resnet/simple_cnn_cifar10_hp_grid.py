@@ -152,6 +152,20 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Set seeds for reproducibility
+    SEED = 42
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    import numpy as np
+
+    np.random.seed(SEED)
+    import random
+
+    random.seed(SEED)
+
     pipeline_space = {
         "learning_rate": neps.Categorical(choices=[1e-5, 1e-4, 1e-3, 1e-2, 1e-1]),
         "beta1": neps.Categorical(choices=[0.9, 0.95, 0.99]),
@@ -172,7 +186,6 @@ if __name__ == "__main__":
         f"{args.gpus_per_node}_gpus_{args.n_trainable_layers}_trainable"
     )
 
-    # TODO: set seed for reproducibility across torch and numpy
     neps.run(
         evaluate_pipeline=partial(
             training_pipeline,
